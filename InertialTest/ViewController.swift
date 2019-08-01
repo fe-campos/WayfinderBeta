@@ -7,6 +7,7 @@
 //
 
 import UIKit
+import MessageUI
 import Dispatch
 import CoreLocation
 import CoreMotion
@@ -20,7 +21,7 @@ extension Double {
     }
 }
 
-class ViewController: UIViewController, CLLocationManagerDelegate, CBCentralManagerDelegate {
+class ViewController: UIViewController, CLLocationManagerDelegate, MFMailComposeViewControllerDelegate {
     
     // MARK: UI
     
@@ -34,19 +35,27 @@ class ViewController: UIViewController, CLLocationManagerDelegate, CBCentralMana
     @IBOutlet weak var gyroRawLabel: UILabel!
     @IBOutlet weak var magRawLabel: UILabel!
     
+    @IBOutlet weak var stateButton: UIButton!
+    
     // MARK: Initialization
     
-    let boseUUID: String = "74874336-B0D5-47A8-078F-DA43BA41B1BB"
-    let testUUID: String = "FIXME"
-    
-    var centralBLEManager: CBCentralManager!
-    var beaconManager: CLLocationManager!
     var imuManager: CMMotionManager!
+    var locationManager: CLLocationManager!
     var activityManager: CMMotionActivityManager!
     var pedometer = CMPedometer()
     var updateTimer: Timer!
     
-    let updateFrequency: Double = 10.0
+    let updateFrequency: Double = 50.0
+    
+    var motionData: String = "t, ax, ay, az, rx, ry, rz, r, p, y, steps, distance\n"
+    var initTime: Date = Date()
+    
+    var state: Bool = false
+    
+    var hitCount: Int = 7
+    var hitTime: Date = Date()
+    var numSteps: Int = 0
+    var distance: Double = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -57,11 +66,12 @@ class ViewController: UIViewController, CLLocationManagerDelegate, CBCentralMana
         gyroRawLabel.text = "# Steps: 0"
         magRawLabel.text = "Distance Traveled: 0 m"
         
-        beaconManager = CLLocationManager()
-        beaconManager.delegate = self
-        beaconManager.requestAlwaysAuthorization()
+        locationManager = CLLocationManager()
+        locationManager.delegate = self
+        locationManager.requestAlwaysAuthorization()
         
-        centralBLEManager = CBCentralManager(delegate: self, queue: nil)
+        locationManager.startUpdatingLocation()
+        locationManager.startUpdatingHeading()
         
         imuManager = CMMotionManager()
         imuManager.startAccelerometerUpdates()
@@ -96,8 +106,10 @@ class ViewController: UIViewController, CLLocationManagerDelegate, CBCentralMana
                 guard let pedometerData = pedometerData, error == nil else { return }
                 
                 DispatchQueue.main.async {
+                    self?.numSteps = pedometerData.numberOfSteps.intValue
                     self?.gyroRawLabel.text = "Number of Steps Taken: \(pedometerData.numberOfSteps.stringValue)"
                     if let d = pedometerData.distance {
+                        self?.distance = d.doubleValue
                         self?.magRawLabel.text = "Distance Traveled: \(d.stringValue)"
                     }
                 }
@@ -105,6 +117,8 @@ class ViewController: UIViewController, CLLocationManagerDelegate, CBCentralMana
         } else {
             print("Steps not available.")
         }
+        
+        initTime = Date()
         
         imuManager.accelerometerUpdateInterval = 1.0 / updateFrequency
         imuManager.gyroUpdateInterval = 1.0 / updateFrequency
@@ -131,72 +145,102 @@ class ViewController: UIViewController, CLLocationManagerDelegate, CBCentralMana
             accelFilteredLabel.text = "Acceleration (g): (\(deviceMotionData.userAcceleration.x.roundTo(x: p)), \(deviceMotionData.userAcceleration.y.roundTo(x: p)), \(deviceMotionData.userAcceleration.z.roundTo(x: p)))"
             orientationFilteredLabel.text = "Orientation (rad): (\(deviceMotionData.attitude.roll.roundTo(x: p)), \(deviceMotionData.attitude.pitch.roundTo(x: p)), \(deviceMotionData.attitude.yaw.roundTo(x: p)))"
             headingFilteredLabel.text = "Heading (deg): \(deviceMotionData.heading.roundTo(x: p))"
-        }
-    }
-    
-    // MARK: Scanning & Positioning
-    
-    func startScanning() {
-        let uuid = UUID(uuidString: boseUUID)!
-        let beaconRegion = CLBeaconRegion(proximityUUID: uuid, identifier: "MyBeacon")
-        
-        beaconManager.startMonitoring(for: beaconRegion)
-        beaconManager.startRangingBeacons(in: beaconRegion)
-        
-        print("Started ranging for beacon: \(beaconRegion)")
-    }
-    
-    func locationManager(_ manager: CLLocationManager, didRangeBeacons beacons: [CLBeacon], in region: CLBeaconRegion) {
-        if beacons.count > 0 {
-            updateDistance(beacons[0].proximity)
-            print(beacons[0].rssi)
-        } else {
-            updateDistance(.unknown)
-            print(centralBLEManager.retrievePeripherals(withIdentifiers: [UUID(uuidString: boseUUID)!]))
-        }
-    }
-    
-    func updateDistance(_ distance: CLProximity) {
-        UIView.animate(withDuration: 0.8) {
-            switch distance {
-            case .unknown:
-                self.view.backgroundColor = UIColor.gray
+            
+            if (state) {
+                let datastr = "\(Date().timeIntervalSince(initTime)), \(deviceMotionData.userAcceleration.x), \(deviceMotionData.userAcceleration.y), \(deviceMotionData.userAcceleration.z), \(deviceMotionData.rotationRate.x), \(deviceMotionData.rotationRate.y), \(deviceMotionData.rotationRate.z), \(deviceMotionData.attitude.roll), \(deviceMotionData.attitude.pitch), \(deviceMotionData.attitude.yaw), \(numSteps), \(distance)\n"
                 
-            case .far:
-                self.view.backgroundColor = UIColor.red
-                
-            case .near:
-                self.view.backgroundColor = UIColor.orange
-                
-            case .immediate:
-                self.view.backgroundColor = UIColor.green
-            @unknown default:
-                fatalError("CLProximity threw undefined case.")
+                motionData.append(datastr)
             }
         }
     }
     
-    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
-        if let power = advertisementData[CBAdvertisementDataTxPowerLevelKey] as? Double{
-            print("Distance from peripheral: ", pow(10, ((power - Double(truncating: RSSI))/20)))
-        }
+    func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        // imuUpdate()
     }
     
-    func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        // FIXME: fill in
-        print(central.state)
-    }
+    // Recording
     
-    // MARK: Protocol Methods
-
-    func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
-        if status == .authorizedAlways {
-            if CLLocationManager.isMonitoringAvailable(for: CLBeaconRegion.self) {
-                if CLLocationManager.isRangingAvailable() {
-                    startScanning()
+    @IBAction func stateButtonHit(_ sender: Any) {
+        state = !state
+        if (!state) {
+            let curr: Date = Date()
+            if (curr.timeIntervalSince(hitTime) < 0.25) {
+                hitCount -= 1
+            } else {
+                hitCount = 10
+            }
+            hitTime = curr
+            state = !state
+            if (hitCount == 0) {
+                state = !state
+                stateButton.setTitle("Run", for: .normal)
+                // write string
+                print(motionData)
+                let file = "imuData.txt"
+                if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    let fileURL = dir.appendingPathComponent(file)
+                    do {
+                        try motionData.write(to: fileURL, atomically: false, encoding: .utf8)
+                        sendEmail(url: fileURL)
+                    } catch {
+                        /* error handling here */
+                        print("Write failed.")
+                    }
                 }
             }
+        } else {
+            stateButton.setTitle("Save", for: .normal)
         }
+    }
+    
+    
+    func sendEmail(url: URL) {
+        if MFMailComposeViewController.canSendMail() {
+            print("sending mail")
+            let mailComposer = MFMailComposeViewController()
+            mailComposer.setSubject("IMU Data")
+            mailComposer.setMessageBody("Attached as a text file.", isHTML: false)
+            mailComposer.setToRecipients(["Arijit.Chatterjee@microsoft.com"])
+            print("ok")
+            
+            do {
+                let attachmentData = try Data(contentsOf: url)
+                mailComposer.addAttachmentData(attachmentData, mimeType: "text/plain", fileName: "imuData")
+                mailComposer.mailComposeDelegate = self
+                self.present(mailComposer, animated: true, completion: nil)
+            } catch let error {
+                print("We have encountered error \(error.localizedDescription)")
+            }
+            
+        } else {
+            print("Email is not configured in settings app or we are not able to send an email")
+        }
+    }
+    
+    //MARK:- MailcomposerDelegate
+    
+    func mailComposeController(_ controller: MFMailComposeViewController, didFinishWith result: MFMailComposeResult, error: Error?) {
+        switch result {
+        case .cancelled:
+            print("User cancelled")
+            break
+            
+        case .saved:
+            print("Mail is saved by user")
+            break
+            
+        case .sent:
+            print("Mail is sent successfully")
+            break
+            
+        case .failed:
+            print("Sending mail is failed")
+            break
+        default:
+            break
+        }
+        
+        controller.dismiss(animated: true)
     }
 }
 
